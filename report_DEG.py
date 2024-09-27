@@ -1,86 +1,128 @@
-from pathlib import Path
-
 import pandas
 from datetime import datetime
+import re
 
 
-def create_deg_report(ss1_fname, ss2_fname, ss1_sname, ss2_sname, ss1_exp_lvl_col_name, ss2_exp_lvl_col_name):
+def parse_gene_number(gene_text):
+    gene_number_re = re.compile(r"g\d+")
+    m = re.search(gene_number_re, gene_text)
+    if m:
+        return m.group(0)
+    else:
+        return None
+
+
+class DegDataObj:
+    GENE_COL_NAME = "extracted_common_gene_id"
+
+    def __init__(self, wb_fp, ss_name, short_uniq_id, gene_col_name, expr_lvl_col_name):
+        self.wb_fp = wb_fp
+        self.df = pandas.read_excel(wb_fp, sheet_name=ss_name)
+        self.id = short_uniq_id
+        self.expr_lvl_col_name = f"{expr_lvl_col_name}_{self.id}"
+        self.df.rename(columns={expr_lvl_col_name: self.expr_lvl_col_name}, inplace=True)
+        self.df[DegDataObj.GENE_COL_NAME] = self.df[gene_col_name].apply(lambda x: parse_gene_number(x))
+
+    def get_gene_col(self):
+        return self.df[DegDataObj.GENE_COL_NAME]
+
+
+def get_unique_genes(deg_obj1: DegDataObj, deg_obj2: DegDataObj):
+    return deg_obj1.df[~deg_obj1.get_gene_col().isin(deg_obj2.get_gene_col())]
+
+
+def __get_common_genes_df_from_1st_deg_obj(deg_obj1: DegDataObj, deg_obj2: DegDataObj):
+    return deg_obj1.df[deg_obj1.get_gene_col().isin(deg_obj2.get_gene_col())]
+
+
+def get_upregulated_genes(deg_obj: DegDataObj):
+    return deg_obj.df[deg_obj.df[deg_obj.expr_lvl_col_name] > 0]
+
+
+def get_downregulated_genes(deg_obj: DegDataObj):
+    return deg_obj.df[deg_obj.df[deg_obj.expr_lvl_col_name] < 0]
+
+
+def __merge_deg_df_records(deg_obj1, df1, deg_obj2, df2):
+    merged_dfs = pandas.merge(
+        left=df1, right=df2, on=DegDataObj.GENE_COL_NAME,
+        suffixes=(f"_{deg_obj1.id}", f"_{deg_obj2.id}"), how='inner'
+    )
+    leading_columns = [DegDataObj.GENE_COL_NAME, deg_obj1.expr_lvl_col_name, deg_obj2.expr_lvl_col_name]
+    return merged_dfs[leading_columns + [col for col in merged_dfs.columns if col not in leading_columns]]
+
+
+def find_commonly_upregulated_genes(deg_obj1: DegDataObj, deg_obj2: DegDataObj):
+    up_reg1 = get_upregulated_genes(deg_obj1)
+    up_reg2 = get_upregulated_genes(deg_obj2)
+    return __merge_deg_df_records(deg_obj1, up_reg1, deg_obj2, up_reg2)
+
+
+def find_commonly_downregulated_genes(deg_obj1: DegDataObj, deg_obj2: DegDataObj):
+    down_reg1 = get_downregulated_genes(deg_obj1)
+    down_reg2 = get_downregulated_genes(deg_obj2)
+    return __merge_deg_df_records(deg_obj1, down_reg1, deg_obj2, down_reg2)
+
+
+def find_inversely_regulated_genes(deg_obj1: DegDataObj, deg_obj2: DegDataObj):
+    up_reg1 = get_upregulated_genes(deg_obj1)
+    down_reg2 = get_downregulated_genes(deg_obj2)
+    up1_down2 = __merge_deg_df_records(deg_obj1, up_reg1, deg_obj2, down_reg2)
+
+    down_reg1 = get_downregulated_genes(deg_obj1)
+    up_reg2 = get_upregulated_genes(deg_obj2)
+    down1_up2 = __merge_deg_df_records(deg_obj1, down_reg1, deg_obj2, up_reg2)
+
+    return pandas.concat([up1_down2, down1_up2], ignore_index=True)
+
+
+def report_common_and_inverse_gn_reg(deg_obj1: DegDataObj, deg_obj2: DegDataObj):
+    if deg_obj1.id == deg_obj2.id:
+        return "No file created... IDs provided were not unique"
+
     timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
 
-    # read in both excel workbooks to dataframes
-    ss1_df = pandas.read_excel(ss1_fname, sheet_name=ss1_sname)
-    ss2_df = pandas.read_excel(ss2_fname, sheet_name=ss2_sname)
+    uniq_gns1 = get_unique_genes(deg_obj1, deg_obj2)
+    uniq_gns2 = get_unique_genes(deg_obj2, deg_obj1)
+    common_up_reg_gns = find_commonly_upregulated_genes(deg_obj1, deg_obj2)
+    common_down_reg_gns = find_commonly_downregulated_genes(deg_obj1, deg_obj2)
+    inverse_reg_gns = find_inversely_regulated_genes(deg_obj1, deg_obj2)
 
-    # find the genes unique to each ss
-    ss1_unique_genes = ss1_df[~ss1_df.Genes.isin(ss2_df.Genes)]
-    ss2_unique_genes = ss2_df[~ss2_df.Genes.isin(ss1_df.Genes)]
-    ss1_common_genes = ss1_df[ss1_df.Genes.isin(ss2_df.Genes)]
-    ss2_common_genes = ss2_df[ss2_df.Genes.isin(ss1_df.Genes)]
-
-    # find upregulated and downregulated genes
-    ss1_upregulated_genes = ss1_common_genes[ss1_common_genes[ss1_exp_lvl_col_name] > 0]
-    ss1_downregulated_genes = ss1_common_genes[ss1_common_genes[ss1_exp_lvl_col_name] < 0]
-    ss2_upregulated_genes = ss2_common_genes[ss2_common_genes[ss2_exp_lvl_col_name] > 0]
-    ss2_downregulated_genes = ss2_common_genes[ss2_common_genes[ss2_exp_lvl_col_name] < 0]
-
-    # get the base file names to use as a column name suffix if necessary
-    ss1_fbasename = Path(ss1_fname).stem
-    ss2_fbasename = Path(ss2_fname).stem
-
-    # find the common up and down regulated genes
-    common_upregulated_genes = pandas.merge(
-        left=ss1_upregulated_genes, right=ss2_upregulated_genes, on=['Genes'],
-        suffixes=(f"_{ss1_fbasename}", f"_{ss2_fbasename}"), how='inner'
-    )
-
-    def reorder_columns(df):
-        leading_columns = ['Genes', ss1_exp_lvl_col_name, ss2_exp_lvl_col_name]
-        return df[leading_columns + [col for col in common_upregulated_genes.columns if col not in leading_columns]]
-
-    common_upregulated_genes = reorder_columns(common_upregulated_genes)
-
-    common_downregulated_genes = pandas.merge(
-        left=ss1_downregulated_genes, right=ss2_downregulated_genes, on=['Genes'],
-        suffixes=(f"_{ss1_fbasename}", f"_{ss2_fbasename}"), how='inner'
-    )
-    common_downregulated_genes = reorder_columns(common_downregulated_genes)
-
-    # find the inversely up and down regulated genes
-    inversely_regulated_genes_ss1_up = pandas.merge(
-        left=ss1_upregulated_genes, right=ss2_downregulated_genes, on=['Genes'],
-        suffixes=(f"_{ss1_fbasename}", f"_{ss2_fbasename}"), how='inner'
-    )
-    inversely_regulated_genes_ss2_up = pandas.merge(
-        left=ss1_downregulated_genes, right=ss2_upregulated_genes, on=['Genes'],
-        suffixes=(f"_{ss1_fbasename}", f"_{ss2_fbasename}"), how='inner'
-    )
-    # combine the inversely regulated gene DFs for convenience
-    inversely_regulated_genes = pandas.concat([inversely_regulated_genes_ss1_up,
-                                               inversely_regulated_genes_ss2_up],
-                                              ignore_index=True)
-    inversely_regulated_genes = reorder_columns(inversely_regulated_genes)
+    out_fname = f'Output/{deg_obj1.id}-vs-{deg_obj2.id}_deg_report-{timestamp}.xlsx'
 
     # create a new Excel file with different tabs for the different categories
-    with pandas.ExcelWriter(f'deg_report-{timestamp}.xlsx') as outfile:
-        ss1_unique_genes.to_excel(outfile, sheet_name=f'{ss1_fbasename} Unique', index=False)
-        ss2_unique_genes.to_excel(outfile, sheet_name=f'{ss2_fbasename} Unique', index=False)
-        common_upregulated_genes.to_excel(outfile, sheet_name='Upregulated Genes', index=False)
-        common_downregulated_genes.to_excel(outfile, sheet_name='Downregulated Genes', index=False)
-        inversely_regulated_genes.to_excel(outfile, sheet_name='Inversely Regulated Genes', index=False)
+    with pandas.ExcelWriter(out_fname) as outfile:
+        uniq_gns1.to_excel(outfile, sheet_name=f'{deg_obj1.id} Unique', index=False)
+        uniq_gns2.to_excel(outfile, sheet_name=f'{deg_obj2.id} Unique', index=False)
+        common_up_reg_gns.to_excel(outfile, sheet_name='Upregulated Genes', index=False)
+        common_down_reg_gns.to_excel(outfile, sheet_name='Downregulated Genes', index=False)
+        inverse_reg_gns.to_excel(outfile, sheet_name='Inversely Regulated Genes', index=False)
+
+    return out_fname
+
+
+def generate_report_with_printed_statuses(deg_obj1: DegDataObj, deg_obj2: DegDataObj):
+    print(f"Working on {deg_obj1.id} vs {deg_obj2.id}...")
+    print(report_common_and_inverse_gn_reg(deg_obj1, deg_obj2))
+    print("")
 
 
 if __name__ == '__main__':
-    # todo: change these values to match your excel files!!!
-    ss1_fname = "MultivsUni.xlsx"
-    ss1_sname = "master file"
-    ss1_exp_lvl_col_name = "diffexpr-Day1_MC_vs_WT"
-    ss2_fname = "RLS1MtvsWt.xlsx"
-    ss2_sname = "RLS1_TAP_TA_GO"
-    ss2_exp_lvl_col_name = "diffexpr-TAP_day1_MtvsWT_sig-results"
+    input_folder = "Input"
+    rls_deg = DegDataObj(f"{input_folder}/RLS1MtvsWt.xlsx", "RLS1_TAP_TA_GO", "rls1Mut", "Genes",
+                         "diffexpr-TAP_day1_MtvsWT_sig-results")
+    exp_mt_deg = DegDataObj(f"{input_folder}/MultivsUni.xlsx", "master file", "ExpMult", "Genes",
+                            "diffexpr-Day1_MC_vs_WT")
+    salt_time_course_deg = DegDataObj(f"{input_folder}/SaltTimeCourseZhang2022; DifExpression analysis.xlsx", "Sheet1",
+                                      "SaltTC",
+                                      "GeneID", "SinglecellVSCellgroups_LogFold")
+    predation_deg = DegDataObj(f"{input_folder}/MulticellularityBernardes2022; DifExpression analysis.xlsx", "Sheet1",
+                               "Predation",
+                               "GeneID", "SinglecellVSCellgroups_LogFold")
+    generate_report_with_printed_statuses(rls_deg, exp_mt_deg)
+    generate_report_with_printed_statuses(rls_deg, salt_time_course_deg)
+    generate_report_with_printed_statuses(rls_deg, predation_deg)
+    generate_report_with_printed_statuses(exp_mt_deg, salt_time_course_deg)
+    generate_report_with_printed_statuses(exp_mt_deg, predation_deg)
+    generate_report_with_printed_statuses(salt_time_course_deg, predation_deg)
 
-    print("Generating report...")
-    create_deg_report(ss1_fname=ss1_fname, ss1_sname=ss1_sname,
-                      ss2_fname=ss2_fname, ss2_sname=ss2_sname,
-                      ss1_exp_lvl_col_name=ss1_exp_lvl_col_name,
-                      ss2_exp_lvl_col_name=ss2_exp_lvl_col_name)
-    print("\nDone!")
